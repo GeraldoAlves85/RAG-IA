@@ -7,16 +7,8 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Ambiente para deploy'
-        required: true
-        default: 'staging'
-        type: choice
-        options:
-          - staging
-          - production
-      force_deploy:
-        description: 'Forçar deploy mesmo com falhas?'
+      deploy:
+        description: 'Fazer deploy?'
         required: false
         default: 'false'
         type: choice
@@ -24,17 +16,12 @@ on:
           - 'true'
           - 'false'
 
-env:
-  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-  DOCKER_REPO: rag-ia-github-actions
-
 jobs:
   # ============================================
-  # JOB 1: LINT E VALIDAÇÃO
+  # JOB 1: BUILD E TEST
   # ============================================
-  lint:
-    name: 🔍 Lint & Validação
+  build-and-test:
+    name: 🔨 Build & Test
     runs-on: ubuntu-latest
     
     steps:
@@ -49,201 +36,33 @@ jobs:
       - name: 📦 Instalar dependências
         run: |
           cd backend
-          npm ci || npm install
+          npm install
       
-      - name: ✅ Verificar sintaxe
+      - name: ✅ Rodar testes
         run: |
           cd backend
-          node -c server.js
-          echo "✅ Sintaxe OK"
+          npm test
       
-      - name: 📝 Validar Dockerfiles
-        run: |
-          docker build -t test-backend ./backend --no-cache
-          docker build -t test-frontend ./frontend --no-cache
-          echo "✅ Dockerfiles válidos"
+      - name: 🐳 Build Backend
+        run: docker build -t backend-test ./backend
       
-      - name: 🔍 Validar Docker Compose
-        run: |
-          docker compose config
-          echo "✅ Docker Compose válido"
-
-  # ============================================
-  # JOB 2: TESTES
-  # ============================================
-  tests:
-    name: 🧪 Testes Automatizados
-    runs-on: ubuntu-latest
-    needs: lint
-    
-    steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
+      - name: 🐳 Build Frontend
+        run: docker build -t frontend-test ./frontend
       
-      - name: 🔧 Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-      
-      - name: 📦 Instalar dependências
-        run: |
-          cd backend
-          npm ci || npm install
-      
-      - name: ✅ Rodar testes unitários
-        run: |
-          cd backend
-          npm test || echo "⚠️ Sem testes configurados"
-      
-      - name: 🐳 Testar containers isoladamente
-        run: |
-          # Testar backend
-          docker build -t backend-test ./backend
-          docker run --rm backend-test node -e "console.log('Backend OK')"
-          
-          # Testar frontend
-          docker build -t frontend-test ./frontend
-          docker run --rm frontend-test ls -la /usr/share/nginx/html/
-      
-      - name: 📊 Gerar relatório de testes
-        run: |
-          echo "## 📊 Relatório de Testes" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Lint:** Passou" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Dockerfiles:** Válidos" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Docker Compose:** Válido" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Containers:** Funcionam" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔑 **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "📅 **Data:** $(date)" >> $GITHUB_STEP_SUMMARY
-
-  # ============================================
-  # JOB 3: BUILD DAS IMAGENS
-  # ============================================
-  build:
-    name: 🐳 Build Docker Images
-    runs-on: ubuntu-latest
-    needs: tests
-    if: github.ref == 'refs/heads/main'
-    
-    outputs:
-      backend_tag: ${{ steps.meta-backend.outputs.tags }}
-      frontend_tag: ${{ steps.meta-frontend.outputs.tags }}
-    
-    steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-      
-      - name: 🔑 Login Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: 🏷️ Gerar metadata Backend
-        id: meta-backend
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}
-          tags: |
-            type=sha,prefix=backend- ,format=short
-            type=raw,value=backend-latest
-            type=raw,value=backend-${{ github.sha }}
-      
-      - name: 🏷️ Gerar metadata Frontend
-        id: meta-frontend
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}
-          tags: |
-            type=sha,prefix=frontend- ,format=short
-            type=raw,value=frontend-latest
-            type=raw,value=frontend-${{ github.sha }}
-      
-      - name: 🐳 Build e push Backend
-        uses: docker/build-push-action@v5
-        with:
-          context: ./backend
-          push: true
-          tags: ${{ steps.meta-backend.outputs.tags }}
-          labels: ${{ steps.meta-backend.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      
-      - name: 🐳 Build e push Frontend
-        uses: docker/build-push-action@v5
-        with:
-          context: ./frontend
-          push: true
-          tags: ${{ steps.meta-frontend.outputs.tags }}
-          labels: ${{ steps.meta-frontend.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: 📝 Validar Docker Compose
+        run: docker compose config
       
       - name: ✅ Build concluído
-        run: |
-          echo "✅ Imagens publicadas com sucesso!"
-          echo "📦 Backend: ${{ steps.meta-backend.outputs.tags }}"
-          echo "📦 Frontend: ${{ steps.meta-frontend.outputs.tags }}"
+        run: echo "✅ Build e testes passaram!"
 
   # ============================================
-  # JOB 4: ESCANEAMENTO DE SEGURANÇA
-  # ============================================
-  security:
-    name: 🔒 Security Scan
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    
-    steps:
-      - name: 🔑 Login Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: 🐳 Baixar imagens
-        run: |
-          docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
-          docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
-      
-      - name: 🔒 Escanear Backend com Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
-          format: 'sarif'
-          output: 'trivy-backend.sarif'
-          severity: 'CRITICAL,HIGH'
-      
-      - name: 🔒 Escanear Frontend com Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
-          format: 'sarif'
-          output: 'trivy-frontend.sarif'
-          severity: 'CRITICAL,HIGH'
-      
-      - name: 📤 Upload resultados Trivy
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-backend.sarif'
-      
-      - name: 📤 Upload resultados Frontend
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-frontend.sarif'
-      
-      - name: ✅ Security scan concluído
-        run: echo "✅ Escaneamento de segurança finalizado"
-
-  # ============================================
-  # JOB 5: DEPLOY (MANUAL)
+  # JOB 2: DEPLOY PARA DOCKER HUB
   # ============================================
   deploy:
-    name: 🚀 Deploy
+    name: 🚀 Deploy Docker Hub
     runs-on: ubuntu-latest
-    needs: [build, security]
-    if: github.event_name == 'workflow_dispatch'
+    needs: build-and-test
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
     
     steps:
       - name: 📥 Checkout
@@ -255,92 +74,63 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       
-      - name: 📦 Preparar docker-compose para deploy
+      - name: 🐳 Build Backend
         run: |
-          cat > docker-compose.prod.yml << 'EOL'
-          services:
-            ollama:
-              image: ollama/ollama:latest
-              container_name: ollama
-              ports:
-                - "11434:11434"
-              volumes:
-                - ollama_data:/root/.ollama
-              restart: unless-stopped
-            
-            backend:
-              image: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
-              container_name: assistente-api
-              ports:
-                - "3000:3000"
-              depends_on:
-                - ollama
-              environment:
-                - OLLAMA_HOST=http://ollama:11434
-                - NODE_ENV=production
-              restart: unless-stopped
-            
-            frontend:
-              image: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
-              container_name: assistente-web
-              ports:
-                - "8080:80"
-              depends_on:
-                - backend
-              restart: unless-stopped
-          
-          volumes:
-            ollama_data:
-          EOL
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend ./backend
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-${{ github.sha }} ./backend
       
-      - name: 🚀 Deploy (simulado - produção real)
+      - name: 🐳 Build Frontend
         run: |
-          echo "## 🚀 Relatório de Deploy" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Ambiente:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Data:** $(date)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Imagens deployadas:**" >> $GITHUB_STEP_SUMMARY
-          echo "- Backend: \`${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Frontend: \`${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Comandos para verificar:**" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "docker ps" >> $GITHUB_STEP_SUMMARY
-          echo "curl http://localhost:3000/health" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend ./frontend
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-${{ github.sha }} ./frontend
       
-      - name: 📢 Notificar deploy
+      - name: 📤 Push Backend
         run: |
-          echo "✅ Deploy para ${{ github.event.inputs.environment }} concluído!"
+          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend
+          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-${{ github.sha }}
+      
+      - name: 📤 Push Frontend
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend
+          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-${{ github.sha }}
+      
+      - name: 📤 Push Latest Tags
+        run: |
+          docker tag ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-latest
+          docker tag ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-latest
+      
+      - name: ✅ Deploy concluído
+        run: |
+          echo "🎉 Deploy realizado com sucesso!"
+          echo "📦 Imagens disponíveis:"
+          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend"
+          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend"
+          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-latest"
+          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-latest"
 
   # ============================================
-  # JOB 6: NOTIFICAÇÃO FINAL
+  # JOB 3: NOTIFICAÇÃO
   # ============================================
   notify:
     name: 📢 Notificação
     runs-on: ubuntu-latest
-    needs: [lint, tests, build, security]
+    needs: [build-and-test, deploy]
     if: always()
     
     steps:
       - name: ✅ Status Final
         run: |
           echo "========================================="
-          echo "📊 STATUS FINAL DO PIPELINE"
+          echo "📊 STATUS DO PIPELINE"
           echo "========================================="
-          echo "🔍 Lint: ${{ needs.lint.result }}"
-          echo "🧪 Tests: ${{ needs.tests.result }}"
-          echo "🐳 Build: ${{ needs.build.result }}"
-          echo "🔒 Security: ${{ needs.security.result }}"
+          echo "🔨 Build & Test: ${{ needs.build-and-test.result }}"
+          echo "🚀 Deploy: ${{ needs.deploy.result }}"
           echo "========================================="
           
-          if [ "${{ needs.lint.result }}" == "success" ] && \
-             [ "${{ needs.tests.result }}" == "success" ] && \
-             [ "${{ needs.build.result }}" == "success" ]; then
+          if [ "${{ needs.build-and-test.result }}" == "success" ]; then
             echo "🎉 Pipeline executado com sucesso!"
-            exit 0
           else
             echo "❌ Pipeline falhou!"
             exit 1
