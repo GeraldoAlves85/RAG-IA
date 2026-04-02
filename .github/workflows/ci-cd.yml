@@ -24,22 +24,26 @@ jobs:
           npm install
           npm test
       
-      - name: Build Backend Docker Image
+      - name: Build Docker Images
         run: |
           docker build -t assistente-backend ./backend
-          echo "✅ Backend image built"
-      
-      - name: Build Frontend Docker Image
-        run: |
           docker build -t assistente-frontend ./frontend
-          echo "✅ Frontend image built"
+          echo "✅ Build concluído com sucesso!"
       
       - name: Verify Images
         run: |
           docker images | grep assistente
-          echo "✅ Build concluído com sucesso!"
+          echo "✅ Imagens criadas com sucesso!"
       
-      - name: Test Docker Compose
+      - name: Test Docker Compose syntax
         run: |
-          docker-compose config
+          # Usar 'docker compose' em vez de 'docker-compose'
+          docker compose config
           echo "✅ Docker Compose válido!"
+      
+      - name: Final Status
+        run: |
+          echo "🎉 Pipeline concluído com sucesso!"
+          echo "✅ Backend image: assistente-backend:latest"
+          echo "✅ Frontend image: assistente-frontend:latest"
+          echo "✅ Docker Compose: válido"
