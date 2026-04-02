@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log
+*.log
+.env
+ollama_data/
+.DS_Store
+*.pid
+coverage/
+dist/
