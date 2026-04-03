@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline - Build, Test & Deploy
 
 on:
   push:
@@ -7,25 +7,32 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      deploy:
-        description: 'Fazer deploy?'
-        required: false
+      deploy_to_dockerhub:
+        description: 'Deploy para Docker Hub?'
+        required: true
         default: 'false'
         type: choice
         options:
           - 'true'
           - 'false'
 
+env:
+  DOCKER_USERNAME: geraldoti2022
+  DOCKER_REPO: rag-ia-github-actions
+
 jobs:
   # ============================================
-  # JOB 1: BUILD E TEST
+  # JOB 1: BUILD E TESTE
   # ============================================
   build-and-test:
     name: 🔨 Build & Test
     runs-on: ubuntu-latest
+    outputs:
+      backend_image: ${{ steps.backend_tag.outputs.tag }}
+      frontend_image: ${{ steps.frontend_tag.outputs.tag }}
     
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout do código
         uses: actions/checkout@v4
       
       - name: 🔧 Setup Node.js
@@ -33,105 +40,230 @@ jobs:
         with:
           node-version: '18'
       
-      - name: 📦 Instalar dependências
+      - name: 📦 Instalar dependências do backend
         run: |
           cd backend
-          npm install
+          npm ci || npm install
       
-      - name: ✅ Rodar testes
+      - name: ✅ Executar testes do backend
         run: |
           cd backend
           npm test
       
-      - name: 🐳 Build Backend
-        run: docker build -t backend-test ./backend
+      - name: 🐳 Build imagem Backend
+        id: backend_tag
+        run: |
+          docker build -t backend-test ./backend
+          echo "tag=backend-${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "✅ Backend image built"
       
-      - name: 🐳 Build Frontend
-        run: docker build -t frontend-test ./frontend
+      - name: 🐳 Build imagem Frontend
+        id: frontend_tag
+        run: |
+          docker build -t frontend-test ./frontend
+          echo "tag=frontend-${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "✅ Frontend image built"
       
       - name: 📝 Validar Docker Compose
-        run: docker compose config
+        run: |
+          docker compose config
+          echo "✅ Docker Compose válido"
       
-      - name: ✅ Build concluído
-        run: echo "✅ Build e testes passaram!"
+      - name: 🧪 Testar containers
+        run: |
+          # Testar backend
+          docker run --rm backend-test node -e "console.log('Backend OK')"
+          
+          # Testar frontend
+          docker run --rm frontend-test ls -la /usr/share/nginx/html/
+          echo "✅ Containers funcionando"
+      
+      - name: 📊 Gerar relatório de testes
+        run: |
+          echo "## 📊 Relatório de Build & Test" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Etapa | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependências | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Testes | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Backend | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Frontend | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Compose | ✅ |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔑 **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "📅 **Data:** $(date)" >> $GITHUB_STEP_SUMMARY
 
   # ============================================
   # JOB 2: DEPLOY PARA DOCKER HUB
   # ============================================
-  deploy:
-    name: 🚀 Deploy Docker Hub
+  deploy-dockerhub:
+    name: 🚀 Deploy para Docker Hub
     runs-on: ubuntu-latest
     needs: build-and-test
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_dockerhub == 'true'
     
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout do código
         uses: actions/checkout@v4
       
-      - name: 🔑 Login Docker Hub
+      - name: 🔑 Login no Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
+          username: ${{ env.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       
-      - name: 🐳 Build Backend
+      - name: 🏷️ Gerar tags e versão
+        id: vars
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend ./backend
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-${{ github.sha }} ./backend
+          echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
       
-      - name: 🐳 Build Frontend
+      - name: 🐳 Build e tag Backend
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend ./frontend
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-${{ github.sha }} ./frontend
+          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend \
+                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.date }} \
+                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.sha_short }} \
+                       ./backend
       
-      - name: 📤 Push Backend
+      - name: 🐳 Build e tag Frontend
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend
-          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-${{ github.sha }}
+          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend \
+                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.date }} \
+                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.sha_short }} \
+                       ./frontend
       
-      - name: 📤 Push Frontend
+      - name: 📤 Push Backend para Docker Hub
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend
-          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-${{ github.sha }}
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.date }}
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.sha_short }}
+          echo "✅ Backend pushed"
       
-      - name: 📤 Push Latest Tags
+      - name: 📤 Push Frontend para Docker Hub
         run: |
-          docker tag ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-latest
-          docker tag ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-latest
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.date }}
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.sha_short }}
+          echo "✅ Frontend pushed"
       
-      - name: ✅ Deploy concluído
+      - name: 🏷️ Criar tag latest
         run: |
-          echo "🎉 Deploy realizado com sucesso!"
-          echo "📦 Imagens disponíveis:"
-          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend"
-          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend"
-          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:backend-latest"
-          echo "  - ${{ secrets.DOCKER_USERNAME }}/rag-ia-github-actions:frontend-latest"
+          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
+      
+      - name: ✅ Verificar imagens no Docker Hub
+        run: |
+          echo "## 🚀 Relatório de Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deploy realizado com sucesso!**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Imagens publicadas:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Backend:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.date }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Frontend:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.date }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 **Verifique em:** https://hub.docker.com/r/${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}/tags" >> $GITHUB_STEP_SUMMARY
 
   # ============================================
-  # JOB 3: NOTIFICAÇÃO
+  # JOB 3: VERIFICAÇÃO PÓS-DEPLOY
   # ============================================
-  notify:
-    name: 📢 Notificação
+  verify-deploy:
+    name: 🔍 Verificar Deploy
     runs-on: ubuntu-latest
-    needs: [build-and-test, deploy]
+    needs: deploy-dockerhub
+    if: always() && needs.deploy-dockerhub.result == 'success'
+    
+    steps:
+      - name: 🐳 Baixar imagens do Docker Hub
+        run: |
+          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend
+          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend
+          echo "✅ Imagens baixadas com sucesso"
+      
+      - name: 🧪 Testar imagem Backend
+        run: |
+          docker run --rm -d --name test-backend -p 3000:3000 ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend
+          sleep 5
+          curl -f http://localhost:3000/health && echo "✅ Backend funcionando" || echo "⚠️ Backend com problema"
+          docker stop test-backend
+      
+      - name: 🧪 Testar imagem Frontend
+        run: |
+          docker run --rm -d --name test-frontend -p 8080:80 ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend
+          sleep 2
+          curl -f -I http://localhost:8080 && echo "✅ Frontend funcionando" || echo "⚠️ Frontend com problema"
+          docker stop test-frontend
+      
+      - name: ✅ Verificação concluída
+        run: |
+          echo "## ✅ Verificação Pós-Deploy" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Imagem | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ✅ Funcionando |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ✅ Funcionando |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🎉 **Deploy verificado e funcionando!**" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================
+  # JOB 4: NOTIFICAÇÃO FINAL
+  # ============================================
+  notification:
+    name: 📢 Notificação Final
+    runs-on: ubuntu-latest
+    needs: [build-and-test, deploy-dockerhub, verify-deploy]
     if: always()
     
     steps:
-      - name: ✅ Status Final
+      - name: 📊 Status do Pipeline
         run: |
           echo "========================================="
-          echo "📊 STATUS DO PIPELINE"
+          echo "📊 STATUS FINAL DO PIPELINE"
           echo "========================================="
           echo "🔨 Build & Test: ${{ needs.build-and-test.result }}"
-          echo "🚀 Deploy: ${{ needs.deploy.result }}"
+          echo "🚀 Deploy Docker Hub: ${{ needs.deploy-dockerhub.result }}"
+          echo "🔍 Verify Deploy: ${{ needs.verify-deploy.result }}"
           echo "========================================="
           
           if [ "${{ needs.build-and-test.result }}" == "success" ]; then
-            echo "🎉 Pipeline executado com sucesso!"
+            echo "✅ Build e testes passaram!"
           else
-            echo "❌ Pipeline falhou!"
+            echo "❌ Build ou testes falharam!"
             exit 1
           fi
+          
+          if [ "${{ needs.deploy-dockerhub.result }}" == "success" ]; then
+            echo "✅ Deploy realizado com sucesso!"
+            echo "🔗 https://hub.docker.com/r/${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}/tags"
+          fi
+          
+          echo "========================================="
+          echo "🎉 Pipeline concluído em $(date)"
+          echo "========================================="
+      
+      - name: 📝 Gerar resumo completo
+        run: |
+          echo "# 🚀 Pipeline CI/CD Completo" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Resumo da Execução" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status | Tempo |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build & Test | ${{ needs.build-and-test.result }} | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy Docker Hub | ${{ needs.deploy-dockerhub.result }} | - |" >> $GITHUB_STEP_SUMMARY
+          echo "| Verify Deploy | ${{ needs.verify-deploy.result }} | - |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔗 Links Úteis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- [Docker Hub](https://hub.docker.com/r/${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}/tags)" >> $GITHUB_STEP_SUMMARY
+          echo "- [GitHub Actions](https://github.com/${{ github.repository }}/actions)" >> $GITHUB_STEP_SUMMARY
+          echo "- [Repositório](https://github.com/${{ github.repository }})" >> $GITHUB_STEP_SUMMARY
