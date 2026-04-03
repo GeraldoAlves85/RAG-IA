@@ -139,3 +139,4 @@ curl -X POST http://localhost:3000/ask \
   -d '{"question":"O que é uma closure em JavaScript?"}'
 
  
+# Pipeline Update Thu Apr  2 21:58:38 -03 2026
