@@ -6,25 +6,35 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Deploy to production'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  DOCKER_USERNAME: geraldoti2022
+  DOCKER_REPO: rag-ia-github-actions
 
 jobs:
-  code-quality:
-    name: Code Quality
+  stage1-quality:
+    name: Stage 1 - Code Quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Validate Dockerfiles
         run: |
-          docker build -t backend-test ./backend
-          docker build -t frontend-test ./frontend
-          docker rmi backend-test frontend-test
+          docker build -t backend-validate ./backend
+          docker build -t frontend-validate ./frontend
+          docker rmi backend-validate frontend-validate
       - name: Validate compose
         run: docker compose config
 
-  tests:
-    name: Tests
+  stage2-tests:
+    name: Stage 2 - Tests
     runs-on: ubuntu-latest
-    needs: code-quality
+    needs: stage1-quality
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,48 +49,98 @@ jobs:
           cd backend
           npm test
 
-  build:
-    name: Build and Publish
+  stage3-build:
+    name: Stage 3 - Build Images
     runs-on: ubuntu-latest
-    needs: tests
+    needs: stage2-tests
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend
+        run: docker build -t backend-build ./backend
+      - name: Build frontend
+        run: docker build -t frontend-build ./frontend
+      - name: Test images
+        run: |
+          docker run --rm backend-build node -e "console.log('Backend OK')"
+          docker run --rm frontend-build ls -la /usr/share/nginx/html/
+
+  stage4-publish:
+    name: Stage 4 - Publish to Docker Hub
+    runs-on: ubuntu-latest
+    needs: stage3-build
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: geraldoti2022
+          username: ${{ env.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-      - name: Build backend
+      - name: Build and push backend
         run: |
-          docker build -t geraldoti2022/rag-ia-github-actions:backend ./backend
-          docker push geraldoti2022/rag-ia-github-actions:backend
-      - name: Build frontend
+          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ./backend
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend
+      - name: Build and push frontend
         run: |
-          docker build -t geraldoti2022/rag-ia-github-actions:frontend ./frontend
-          docker push geraldoti2022/rag-ia-github-actions:frontend
+          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ./frontend
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend
       - name: Tag latest
         run: |
-          docker tag geraldoti2022/rag-ia-github-actions:backend geraldoti2022/rag-ia-github-actions:backend-latest
-          docker tag geraldoti2022/rag-ia-github-actions:frontend geraldoti2022/rag-ia-github-actions:frontend-latest
-          docker push geraldoti2022/rag-ia-github-actions:backend-latest
-          docker push geraldoti2022/rag-ia-github-actions:frontend-latest
+          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
 
-  verify:
-    name: Verification
+  stage5-verify:
+    name: Stage 5 - Verify Images
     runs-on: ubuntu-latest
-    needs: build
+    needs: stage4-publish
     steps:
-      - name: Pull images
+      - name: Pull and test images
         run: |
-          docker pull geraldoti2022/rag-ia-github-actions:backend-latest
-          docker pull geraldoti2022/rag-ia-github-actions:frontend-latest
+          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
           echo "Images verified successfully"
 
-  report:
-    name: Report
+  stage6-deploy:
+    name: Stage 6 - Deploy
     runs-on: ubuntu-latest
-    needs: [code-quality, tests, build, verify]
+    needs: stage5-verify
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Deploy containers
+        run: |
+          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
+          docker stop assistente-api assistente-web ollama 2>/dev/null || true
+          docker rm assistente-api assistente-web ollama 2>/dev/null || true
+          docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
+          docker run -d --name assistente-api -p 3000:3000 --link ollama -e OLLAMA_HOST=http://ollama:11434 ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker run -d --name assistente-web -p 8080:80 --link assistente-api ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
+
+  stage7-health:
+    name: Stage 7 - Health Check
+    runs-on: ubuntu-latest
+    needs: stage6-deploy
+    if: always() && needs.stage6-deploy.result == 'success'
+    steps:
+      - name: Verify health
+        run: |
+          sleep 10
+          curl -f http://localhost:3000/health || exit 1
+          curl -f -I http://localhost:8080 || exit 1
+          echo "All systems healthy"
+
+  stage8-report:
+    name: Stage 8 - Report
+    runs-on: ubuntu-latest
+    needs: [stage1-quality, stage2-tests, stage3-build, stage4-publish, stage5-verify, stage6-deploy, stage7-health]
     if: always()
     steps:
       - name: Generate report
@@ -88,8 +148,32 @@ jobs:
           echo "========================================="
           echo "CI/CD PIPELINE REPORT"
           echo "========================================="
-          echo "Code Quality: ${{ needs.code-quality.result }}"
-          echo "Tests: ${{ needs.tests.result }}"
-          echo "Build: ${{ needs.build.result }}"
-          echo "Verify: ${{ needs.verify.result }}"
+          echo "Stage 1 - Code Quality: ${{ needs.stage1-quality.result }}"
+          echo "Stage 2 - Tests: ${{ needs.stage2-tests.result }}"
+          echo "Stage 3 - Build Images: ${{ needs.stage3-build.result }}"
+          echo "Stage 4 - Publish: ${{ needs.stage4-publish.result }}"
+          echo "Stage 5 - Verify: ${{ needs.stage5-verify.result }}"
+          echo "Stage 6 - Deploy: ${{ needs.stage6-deploy.result }}"
+          echo "Stage 7 - Health Check: ${{ needs.stage7-health.result }}"
           echo "========================================="
+          echo "IMAGES:"
+          echo "  Backend: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest"
+          echo "  Frontend: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest"
+          echo "========================================="
+      - name: GitHub summary
+        run: |
+          echo "# CI/CD Pipeline Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Code Quality | ${{ needs.stage1-quality.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests | ${{ needs.stage2-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Images | ${{ needs.stage3-build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Publish | ${{ needs.stage4-publish.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Verify | ${{ needs.stage5-verify.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deploy | ${{ needs.stage6-deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Health Check | ${{ needs.stage7-health.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Images" >> $GITHUB_STEP_SUMMARY
+          echo "- Backend: \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Frontend: \`${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest\`" >> $GITHUB_STEP_SUMMARY
