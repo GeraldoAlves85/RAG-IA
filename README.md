@@ -1,4 +1,4 @@
-# 🤖 Assistente RAG com Ollama, Docker e CI/CD
+# Assistente RAG com Ollama, Docker e CI/CD
 
 ![CI/CD Pipeline](https://github.com/GeraldoAlves85/RAG-IA/actions/workflows/ci-cd.yml/badge.svg)
 ![Docker](https://img.shields.io/badge/Docker-Container-blue)
@@ -33,41 +33,108 @@
 ## 🏗️ Arquitetura do Sistema
 
 
-## 🐳 Docker Hub
+## 🚀 Começando
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/geraldoti2022/rag-ia-github-actions)](https://hub.docker.com/r/geraldoti2022/rag-ia-github-actions)
+### Pré-requisitos
 
-### Imagens disponíveis
+- **Docker** (20.10+)
+- **Docker Compose** (2.0+)
+- **Git** (para clonar o repositório)
+- **8GB+ RAM** (recomendado para rodar o Ollama)
 
-```bash
-# Backend API
-docker pull geraldoti2022/rag-ia-github-actions:backend
-docker run -d -p 3000:3000 geraldoti2022/rag-ia-github-actions:backend
-
-# Frontend Web  
-docker pull geraldoti2022/rag-ia-github-actions:frontend
-docker run -d -p 8080:80 geraldoti2022/rag-ia-github-actions:frontend
-
-## CI/CD Pipeline Stages
-
-The pipeline follows enterprise-grade stages:
-
-| Stage | Description | Trigger |
-|-------|-------------|---------|
-| Code Quality | Validates Dockerfiles, dependencies, and configuration | Always |
-| Tests | Runs unit and integration tests | Always |
-| Build & Publish | Creates and pushes Docker images | Main/Tags |
-| Deployment | Deploys to target environment | Main/Tags/Manual |
-| Verification | Validates deployment health | After Deployment |
-| Reporting | Generates execution report | Always |
-
-### Deployment Triggers
-
-- **Push to main**: Automatic deployment to staging
-- **Tag creation**: Automatic deployment to production
-- **Manual trigger**: Select environment via workflow_dispatch
-
-### Quick Release
+### Instalação Rápida
 
 ```bash
-./release.sh v1.0.0
+# 1. Clonar o repositório
+git clone https://github.com/GeraldoAlves85/RAG-IA.git
+cd RAG-IA
+
+# 2. Subir os containers
+docker compose up -d
+
+# 3. Baixar o modelo Ollama (primeira execução)
+docker exec -it ollama ollama pull llama3.2
+
+# 4. Acessar a aplicação
+# Abra http://localhost:8080 no navegador
+
+# Instalar WSL2
+wsl --install
+
+# Instalar Docker Desktop
+# Baixar em: https://www.docker.com/products/docker-desktop
+
+# Clonar e rodar
+git clone https://github.com/GeraldoAlves85/RAG-IA.git
+cd RAG-IA
+docker compose up -d
+
+# Instalar Docker
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+
+# Instalar Docker Compose
+sudo apt install docker-compose-plugin
+
+# Clonar e rodar
+git clone https://github.com/GeraldoAlves85/RAG-IA.git
+cd RAG-IA
+docker compose up -d
+# Instalar Docker Desktop
+brew install --cask docker
+
+# Clonar e rodar
+git clone https://github.com/GeraldoAlves85/RAG-IA.git
+cd RAG-IA
+docker compose up -d
+
+# Ver status dos containers
+docker compose ps
+
+# Ver logs em tempo real
+docker compose logs -f
+
+# Ver logs específicos
+docker compose logs backend
+docker compose logs frontend
+docker compose logs ollama
+
+# Parar todos os containers
+docker compose down
+
+# Reconstruir e subir
+docker compose up -d --build
+
+# Limpar volumes e dados
+docker compose down -v
+
+# Ver uso de recursos
+docker stats
+
+curl http://localhost:3000/health
+
+{
+  "status": "OK",
+  "ollama": "verificando..."
+}
+
+
+curl -X POST http://localhost:3000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"O que é Docker?"}'
+
+  # Pergunta sobre tecnologia
+curl -X POST http://localhost:3000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Explique o que é Kubernetes"}'
+
+# Pergunta sobre ciência
+curl -X POST http://localhost:3000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Como funciona a fotossíntese?"}'
+
+# Pergunta sobre programação
+curl -X POST http://localhost:3000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"O que é uma closure em JavaScript?"}'
+
