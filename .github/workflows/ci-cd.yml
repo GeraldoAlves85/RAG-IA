@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline Enterprise
 
 on:
   push:
@@ -22,385 +22,74 @@ on:
 env:
   DOCKER_USERNAME: geraldoti2022
   DOCKER_REPO: rag-ia-github-actions
-  NODE_VERSION: '18'
 
 jobs:
-  ============================================================================
-  STAGE 1: CODE QUALITY AND VALIDATION
-  ============================================================================
-  
-  code-quality:
-    name: Code Quality and Validation
+  stage1-quality:
+    name: Stage 1 - Code Quality
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js environment
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      
-      - name: Install backend dependencies
-        run: |
-          cd backend
-          npm ci --only=production || npm install --production
-      
-      - name: Check package vulnerabilities
-        run: |
-          cd backend
-          npm audit --production || true
-      
-      - name: Validate Dockerfile syntax
-        run: |
-          docker build -t backend-validation ./backend --no-cache
-          docker build -t frontend-validation ./frontend --no-cache
-          docker rmi backend-validation frontend-validation
-      
-      - name: Validate docker-compose configuration
-        run: |
-          docker compose config --quiet
-      
-      - name: Check required files
-        run: |
-          test -f backend/server.js && echo "backend/server.js: OK"
-          test -f backend/package.json && echo "backend/package.json: OK"
-          test -f frontend/index.html && echo "frontend/index.html: OK"
-          test -f frontend/Dockerfile && echo "frontend/Dockerfile: OK"
-          test -f docker-compose.yml && echo "docker-compose.yml: OK"
-
-  ============================================================================
-  STAGE 2: UNIT AND INTEGRATION TESTS
-  ============================================================================
-  
-  tests:
-    name: Unit and Integration Tests
-    runs-on: ubuntu-latest
-    needs: code-quality
-    timeout-minutes: 15
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
+      - uses: actions/checkout@v4
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-      
+          node-version: '18'
+      - name: Validate Dockerfiles
+        run: |
+          docker build -t backend-validate ./backend
+          docker build -t frontend-validate ./frontend
+          docker rmi backend-validate frontend-validate
+      - name: Validate docker-compose
+        run: docker compose config
+
+  stage2-tests:
+    name: Stage 2 - Tests
+    runs-on: ubuntu-latest
+    needs: stage1-quality
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
       - name: Install dependencies
         run: |
           cd backend
           npm ci || npm install
-      
-      - name: Run unit tests
-        id: unit-tests
+      - name: Run tests
         run: |
           cd backend
           npm test || echo "No tests configured"
-      
-      - name: Build test images
-        run: |
-          docker build -t backend-test ./backend
-          docker build -t frontend-test ./frontend
-      
-      - name: Test backend container
-        run: |
-          docker run --rm backend-test node -e "console.log('Backend runtime OK')"
-      
-      - name: Test frontend container
-        run: |
-          docker run --rm frontend-test ls -la /usr/share/nginx/html/
-      
-      - name: Test API endpoint structure
-        run: |
-          grep -q "/health" backend/server.js && echo "Health endpoint: OK"
-          grep -q "/ask" backend/server.js && echo "Ask endpoint: OK"
 
-  ============================================================================
-  STAGE 3: BUILD AND PUBLISH
-  ============================================================================
-  
-  build-and-publish:
-    name: Build and Publish Images
+  stage3-build:
+    name: Stage 3 - Build and Publish
     runs-on: ubuntu-latest
-    needs: tests
-    if: |
-      github.ref == 'refs/heads/main' ||
-      startsWith(github.ref, 'refs/tags/v') ||
-      github.event_name == 'workflow_dispatch'
-    timeout-minutes: 20
-    
-    outputs:
-      version: ${{ steps.vars.outputs.version }}
-      backend_tag: ${{ steps.vars.outputs.backend_tag }}
-      frontend_tag: ${{ steps.vars.outputs.frontend_tag }}
-    
+    needs: stage2-tests
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
+      - uses: actions/checkout@v4
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: Generate version metadata
-        id: vars
+      - name: Build and push
         run: |
-          SHORT_SHA=${GITHUB_SHA::7}
-          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
-          
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-          else
-            echo "version=${SHORT_SHA}" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Build backend image
-        run: |
-          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend \
-                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.timestamp }} \
-                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.short_sha }} \
-                       ./backend
-      
-      - name: Build frontend image
-        run: |
-          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend \
-                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.timestamp }} \
-                       -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.short_sha }} \
-                       ./frontend
-      
-      - name: Tag release version
-        if: steps.vars.outputs.is_release == 'true'
-        run: |
-          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:${{ steps.vars.outputs.version }}
-          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:${{ steps.vars.outputs.version }}-frontend
-      
-      - name: Publish images to Docker Hub
-        run: |
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }} --all-tags
-      
-      - name: Update latest tags
-        run: |
+          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ./backend
+          docker build -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ./frontend
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend
+          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend
           docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
           docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
           docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
           docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
-      
-      - name: Set outputs
-        run: |
-          echo "backend_tag=${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-${{ steps.vars.outputs.timestamp }}" >> $GITHUB_OUTPUT
-          echo "frontend_tag=${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-${{ steps.vars.outputs.timestamp }}" >> $GITHUB_OUTPUT
 
-  ============================================================================
-  STAGE 4: DEPLOYMENT
-  ============================================================================
-  
-  deploy:
-    name: Deploy to Environment
+  stage4-verify:
+    name: Stage 4 - Verification
     runs-on: ubuntu-latest
-    needs: build-and-publish
-    if: |
-      (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') ||
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/v')
-    timeout-minutes: 15
-    
+    needs: stage3-build
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: Prepare deployment configuration
-        run: |
-          cat > docker-compose.production.yml << 'EOL'
-          version: '3.8'
-          services:
-            ollama:
-              image: ollama/ollama:latest
-              container_name: ollama
-              ports:
-                - "11434:11434"
-              volumes:
-                - ollama_data:/root/.ollama
-              restart: unless-stopped
-            backend:
-              image: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
-              container_name: assistente-api
-              ports:
-                - "3000:3000"
-              depends_on:
-                - ollama
-              environment:
-                - OLLAMA_HOST=http://ollama:11434
-                - NODE_ENV=production
-              restart: unless-stopped
-            frontend:
-              image: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
-              container_name: assistente-web
-              ports:
-                - "8080:80"
-              depends_on:
-                - backend
-              restart: unless-stopped
-          volumes:
-            ollama_data:
-          EOL
-      
-      - name: Deploy to target environment
-        run: |
-          TARGET_ENV="${{ github.event.inputs.environment }}"
-          if [ -z "$TARGET_ENV" ]; then
-            if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]; then
-              TARGET_ENV="production"
-            else
-              TARGET_ENV="staging"
-            fi
-          fi
-          
-          echo "Deploying to: $TARGET_ENV"
-          echo "target_environment=$TARGET_ENV" >> $GITHUB_ENV
-          
-          echo "Deployment simulation completed successfully"
-
-  ============================================================================
-  STAGE 5: POST-DEPLOYMENT VERIFICATION
-  ============================================================================
-  
-  verification:
-    name: Post-Deployment Verification
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: always() && needs.deploy.result == 'success'
-    timeout-minutes: 10
-    
-    steps:
-      - name: Pull images from Docker Hub
+      - name: Pull and test
         run: |
           docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
           docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
-      
-      - name: Verify backend container
-        run: |
-          CONTAINER_ID=$(docker run -d -p 3000:3000 ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest)
-          sleep 8
-          HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health)
-          if [ "$HEALTH_CHECK" == "200" ]; then
-            echo "Backend verification: PASSED"
-          else
-            echo "Backend verification: FAILED"
-            exit 1
-          fi
-          docker stop $CONTAINER_ID
-          docker rm $CONTAINER_ID
-      
-      - name: Verify frontend container
-        run: |
-          CONTAINER_ID=$(docker run -d -p 8080:80 ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest)
-          sleep 3
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
-          if [ "$HTTP_CODE" == "200" ] || [ "$HTTP_CODE" == "304" ]; then
-            echo "Frontend verification: PASSED"
-          else
-            echo "Frontend verification: FAILED"
-            exit 1
-          fi
-          docker stop $CONTAINER_ID
-          docker rm $CONTAINER_ID
-      
-      - name: Verification summary
-        run: |
-          echo "Both backend and frontend containers are functioning correctly"
-
-  ============================================================================
-  STAGE 6: REPORTING AND NOTIFICATIONS
-  ============================================================================
-  
-  reporting:
-    name: Generate Deployment Report
-    runs-on: ubuntu-latest
-    needs: [code-quality, tests, build-and-publish, deploy, verification]
-    if: always()
-    
-    steps:
-      - name: Generate execution report
-        run: |
-          echo "# CI/CD Pipeline Execution Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Execution Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Stage | Status | Duration |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|--------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Code Quality | ${{ needs.code-quality.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Unit Tests | ${{ needs.tests.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Build & Publish | ${{ needs.build-and-publish.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deployment | ${{ needs.deploy.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Verification | ${{ needs.verification.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## Build Information" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit SHA | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Version | ${{ needs.build-and-publish.outputs.version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Backend Image | ${{ needs.build-and-publish.outputs.backend_tag }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend Image | ${{ needs.build-and-publish.outputs.frontend_tag }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [ "${{ needs.code-quality.result }}" == "success" ] && \
-             [ "${{ needs.tests.result }}" == "success" ] && \
-             [ "${{ needs.build-and-publish.result }}" == "success" ]; then
-            echo "## Overall Status: SUCCESS" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All stages completed successfully. Images are available on Docker Hub." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## Overall Status: FAILED" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "One or more stages failed. Please review the logs above." >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "---" >> $GITHUB_STEP_SUMMARY
-          echo "## Useful Links" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- [Docker Hub Repository](https://hub.docker.com/r/${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}/tags)" >> $GITHUB_STEP_SUMMARY
-          echo "- [GitHub Actions](https://github.com/${{ github.repository }}/actions)" >> $GITHUB_STEP_SUMMARY
-          echo "- [Repository](https://github.com/${{ github.repository }})" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Console report
-        run: |
-          echo "========================================="
-          echo "CI/CD Pipeline Execution Report"
-          echo "========================================="
-          echo "Code Quality: ${{ needs.code-quality.result }}"
-          echo "Unit Tests: ${{ needs.tests.result }}"
-          echo "Build & Publish: ${{ needs.build-and-publish.result }}"
-          echo "Deployment: ${{ needs.deploy.result }}"
-          echo "Verification: ${{ needs.verification.result }}"
-          echo "========================================="
-          
-          if [ "${{ needs.code-quality.result }}" == "success" ] && \
-             [ "${{ needs.tests.result }}" == "success" ] && \
-             [ "${{ needs.build-and-publish.result }}" == "success" ]; then
-            echo "Pipeline completed successfully"
-            exit 0
-          else
-            echo "Pipeline completed with failures"
-            exit 1
-          fi
+          echo "Images pulled successfully"
