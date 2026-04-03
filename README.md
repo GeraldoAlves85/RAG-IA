@@ -138,3 +138,4 @@ curl -X POST http://localhost:3000/ask \
   -H "Content-Type: application/json" \
   -d '{"question":"O que é uma closure em JavaScript?"}'
 
+ 
