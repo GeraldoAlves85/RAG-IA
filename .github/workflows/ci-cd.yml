@@ -3,645 +3,83 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Target environment for deployment'
-        required: true
-        default: 'staging'
-        type: choice
-        options:
-          - staging
-          - production
-      skip_tests:
-        description: 'Skip test execution'
+      deploy:
+        description: 'Deploy to production'
         required: false
         default: 'false'
         type: choice
         options:
-          - 'false'
           - 'true'
-  create:
-    tags:
-      - 'v*'
+          - 'false'
 
 env:
   DOCKER_USERNAME: geraldoti2022
-  DOCKER_REPOSITORY: rag-ia-github-actions
-  NODE_VERSION: 18.x
-  GO_VERSION: 1.21
-  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  DOCKER_REPO: rag-ia-github-actions
 
 jobs:
-  ============================================================================
-  STAGE 1: SOURCE CODE VALIDATION
-  ============================================================================
-  
-  source-validation:
-    name: Source Code Validation
+  build-and-test:
+    name: Build and Test
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      validation_status: ${{ steps.validation.outputs.status }}
     
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Validate commit message
-        run: |
-          COMMIT_MSG=$(git log -1 --pretty=%B)
-          echo "Commit message: $COMMIT_MSG"
-          if [[ ${#COMMIT_MSG} -lt 10 ]]; then
-            echo "Warning: Commit message is too short"
-          fi
-      
-      - name: Check for sensitive data
-        run: |
-          echo "Scanning for potential secrets in code"
-          if grep -r "password\|secret\|token\|key" --include="*.js" --include="*.json" --include="*.yml" . 2>/dev/null | grep -v "node_modules" | grep -v ".github"; then
-            echo "Warning: Potential sensitive data found in files"
-          fi
-      
-      - name: Validate branch naming convention
-        run: |
-          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
-          echo "Current branch: $BRANCH_NAME"
-          if [[ "$BRANCH_NAME" != "main" ]] && [[ "$BRANCH_NAME" != "master" ]]; then
-            if [[ ! "$BRANCH_NAME" =~ ^(feature|fix|hotfix|release)/ ]]; then
-              echo "Warning: Branch name does not follow convention"
-            fi
-          fi
-      
-      - name: Set validation status
-        id: validation
-        run: echo "status=passed" >> $GITHUB_OUTPUT
-
-  ============================================================================
-  STAGE 2: DEPENDENCY ANALYSIS
-  ============================================================================
-  
-  dependency-analysis:
-    name: Dependency Analysis
-    runs-on: ubuntu-latest
-    needs: source-validation
-    timeout-minutes: 10
-    
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: '18'
       
-      - name: Install backend dependencies
+      - name: Install dependencies
         run: |
           cd backend
-          npm ci --production=false
-          echo "Total dependencies installed: $(npm list --depth=0 | wc -l)"
+          npm install
       
-      - name: Audit dependencies for vulnerabilities
+      - name: Run tests
         run: |
           cd backend
-          npm audit --json > audit-report.json || true
-          HIGH_COUNT=$(grep -o '"severity":"high"' audit-report.json | wc -l)
-          CRITICAL_COUNT=$(grep -o '"severity":"critical"' audit-report.json | wc -l)
-          echo "High severity vulnerabilities: $HIGH_COUNT"
-          echo "Critical severity vulnerabilities: $CRITICAL_COUNT"
-          if [ $CRITICAL_COUNT -gt 0 ]; then
-            echo "Critical vulnerabilities found. Please fix them."
-          fi
+          npm test
       
-      - name: Check outdated dependencies
+      - name: Build Docker images
         run: |
-          cd backend
-          npm outdated --json > outdated.json || true
-          OUTDATED_COUNT=$(cat outdated.json | grep -v "{}" | wc -l)
-          echo "Outdated dependencies: $OUTDATED_COUNT"
+          docker build -t backend-test ./backend
+          docker build -t frontend-test ./frontend
+          echo "Build completed successfully"
 
-  ============================================================================
-  STAGE 3: CODE QUALITY ANALYSIS
-  ============================================================================
-  
-  code-quality:
-    name: Code Quality Analysis
+  deploy:
+    name: Deploy to Docker Hub
     runs-on: ubuntu-latest
-    needs: dependency-analysis
-    timeout-minutes: 15
+    needs: build-and-test
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
     
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      
-      - name: Run ESLint analysis
-        run: |
-          cd backend
-          if [ -f .eslintrc* ]; then
-            npx eslint . --format=json --output-file=eslint-report.json || true
-            ERROR_COUNT=$(grep -o '"errorCount":[0-9]*' eslint-report.json | head -1 | cut -d: -f2)
-            echo "ESLint errors: ${ERROR_COUNT:-0}"
-          else
-            echo "No ESLint configuration found. Skipping."
-          fi
-      
-      - name: Check code formatting
-        run: |
-          cd backend
-          if [ -f .prettierrc* ]; then
-            npx prettier --check . || echo "Formatting issues found"
-          else
-            echo "No Prettier configuration found. Skipping."
-          fi
-      
-      - name: Analyze code complexity
-        run: |
-          cd backend
-          find . -name "*.js" -not -path "./node_modules/*" -exec wc -l {} \; | sort -rn | head -10
-      
-      - name: Validate Dockerfile best practices
-        run: |
-          echo "Validating backend Dockerfile"
-          if grep -q "root" backend/Dockerfile; then
-            echo "Warning: Container running as root user"
-          fi
-          if grep -q "latest" backend/Dockerfile; then
-            echo "Warning: Using latest tag in Dockerfile"
-          fi
-          
-          echo "Validating frontend Dockerfile"
-          if grep -q "root" frontend/Dockerfile; then
-            echo "Warning: Container running as root user"
-          fi
-
-  ============================================================================
-  STAGE 4: UNIT AND INTEGRATION TESTS
-  ============================================================================
-  
-  test-execution:
-    name: Test Execution
-    runs-on: ubuntu-latest
-    needs: code-quality
-    if: github.event.inputs.skip_tests != 'true'
-    timeout-minutes: 20
-    
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      
-      - name: Install test dependencies
-        run: |
-          cd backend
-          npm ci
-          npm install --save-dev jest supertest
-      
-      - name: Execute unit tests
-        id: unit-tests
-        run: |
-          cd backend
-          if [ -f "package.json" ]; then
-            npm test -- --coverage --json --outputFile=test-results.json || true
-            echo "Unit tests executed"
-          else
-            echo "No test script found"
-          fi
-      
-      - name: Generate test coverage report
-        run: |
-          cd backend
-          if [ -f "coverage/lcov.info" ]; then
-            COVERAGE=$(grep -o "Lines:[0-9.]*" coverage/lcov.info | head -1 | cut -d: -f2)
-            echo "Test coverage: ${COVERAGE:-0}%"
-          else
-            echo "No coverage report generated"
-          fi
-      
-      - name: Execute contract tests
-        run: |
-          echo "Validating API contract"
-          if grep -q "/health" backend/server.js; then
-            echo "Health endpoint: present"
-          fi
-          if grep -q "/ask" backend/server.js; then
-            echo "Ask endpoint: present"
-          fi
-
-  ============================================================================
-  STAGE 5: CONTAINER BUILD AND VERIFICATION
-  ============================================================================
-  
-  container-build:
-    name: Container Build
-    runs-on: ubuntu-latest
-    needs: test-execution
-    timeout-minutes: 25
-    
-    outputs:
-      backend_image: ${{ steps.image_tags.outputs.backend }}
-      frontend_image: ${{ steps.image_tags.outputs.frontend }}
-      image_version: ${{ steps.version.outputs.version }}
-    
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-      
-      - name: Generate version metadata
-        id: version
-        run: |
-          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
-          SHORT_SHA=${GITHUB_SHA::8}
-          BRANCH_NAME=${GITHUB_REF#refs/heads/}
-          BRANCH_NAME=${BRANCH_NAME//\//-}
-          
-          echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
-          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
-          
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
-          elif [[ "$BRANCH_NAME" == "main" ]]; then
-            echo "version=latest" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          else
-            echo "version=dev" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Build backend container
-        id: image_tags
-        run: |
-          BACKEND_TAGS="${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend"
-          BACKEND_TAGS="$BACKEND_TAGS -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-${{ steps.version.outputs.timestamp }}"
-          BACKEND_TAGS="$BACKEND_TAGS -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-${{ steps.version.outputs.short_sha }}"
-          BACKEND_TAGS="$BACKEND_TAGS -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-${{ steps.version.outputs.branch }}"
-          
-          docker build $BACKEND_TAGS ./backend
-          echo "backend=${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-${{ steps.version.outputs.timestamp }}" >> $GITHUB_OUTPUT
-      
-      - name: Build frontend container
-        run: |
-          FRONTEND_TAGS="${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend"
-          FRONTEND_TAGS="$FRONTEND_TAGS -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-${{ steps.version.outputs.timestamp }}"
-          FRONTEND_TAGS="$FRONTEND_TAGS -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-${{ steps.version.outputs.short_sha }}"
-          FRONTEND_TAGS="$FRONTEND_TAGS -t ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-${{ steps.version.outputs.branch }}"
-          
-          docker build $FRONTEND_TAGS ./frontend
-          echo "frontend=${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-${{ steps.version.outputs.timestamp }}" >> $GITHUB_OUTPUT
-      
-      - name: Run container security scan
-        run: |
-          echo "Scanning backend container for vulnerabilities"
-          docker scan ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend || true
-          
-          echo "Scanning frontend container for vulnerabilities"
-          docker scan ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend || true
-      
-      - name: Measure container size
-        run: |
-          BACKEND_SIZE=$(docker images ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend --format "{{.Size}}")
-          FRONTEND_SIZE=$(docker images ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend --format "{{.Size}}")
-          echo "Backend image size: $BACKEND_SIZE"
-          echo "Frontend image size: $FRONTEND_SIZE"
-
-  ============================================================================
-  STAGE 6: ARTIFACT PUBLISHING
-  ============================================================================
-  
-  artifact-publishing:
-    name: Artifact Publishing
-    runs-on: ubuntu-latest
-    needs: container-build
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    timeout-minutes: 15
-    
-    steps:
-      - name: Login to Docker registry
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ env.DOCKER_USERNAME }}
+          username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
       
-      - name: Publish backend image
+      - name: Build backend
         run: |
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-${{ needs.container-build.outputs.image_version }}
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ./backend
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend
       
-      - name: Publish frontend image
+      - name: Build frontend
         run: |
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-${{ needs.container-build.outputs.image_version }}
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ./frontend
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend
       
-      - name: Update latest tags
-        if: github.ref == 'refs/heads/main'
+      - name: Tag latest versions
         run: |
-          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-latest
-          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-latest
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-latest
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-latest
+          docker tag ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker tag ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:backend-latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:frontend-latest
       
-      - name: Tag release version
-      - name: Tag release version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Deploy success
         run: |
-          RELEASE_VERSION=${GITHUB_REF#refs/tags/}
-          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:$RELEASE_VERSION
-          docker tag ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:$RELEASE_VERSION-frontend
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:$RELEASE_VERSION
-          docker push ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:$RELEASE_VERSION-frontend
-
-  ============================================================================
-  STAGE 7: DEPLOYMENT EXECUTION
-  ============================================================================
-  
-  deployment:
-    name: Deployment Execution
-    runs-on: ubuntu-latest
-    needs: artifact-publishing
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
-    timeout-minutes: 20
-    environment: ${{ github.event.inputs.environment || 'staging' }}
-    
-    steps:
-      - name: Checkout deployment configuration
-        uses: actions/checkout@v4
-      
-      - name: Login to Docker registry
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: Prepare deployment manifest
-        run: |
-          DEPLOY_ENV="${{ github.event.inputs.environment }}"
-          if [ -z "$DEPLOY_ENV" ]; then
-            if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]; then
-              DEPLOY_ENV="production"
-            else
-              DEPLOY_ENV="staging"
-            fi
-          fi
-          
-          echo "Deployment target: $DEPLOY_ENV"
-          echo "DEPLOY_ENVIRONMENT=$DEPLOY_ENV" >> $GITHUB_ENV
-          
-          cat > deployment-manifest.json << EOL
-          {
-            "version": "${{ needs.container-build.outputs.image_version }}",
-            "environment": "$DEPLOY_ENV",
-            "timestamp": "$(date -Iseconds)",
-            "commit": "${{ github.sha }}",
-            "backend_image": "${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-latest",
-            "frontend_image": "${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-latest"
-          }
-          EOL
-          
-          cat deployment-manifest.json
-      
-      - name: Execute deployment strategy
-        run: |
-          echo "Starting deployment process"
-          
-          echo "Pulling latest images"
-          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-latest
-          docker pull ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-latest
-          
-          echo "Stopping existing containers"
-          docker stop assistente-api assistente-web ollama 2>/dev/null || true
-          docker rm assistente-api assistente-web ollama 2>/dev/null || true
-          
-          echo "Starting ollama container"
-          docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
-          
-          echo "Starting backend container"
-          docker run -d --name assistente-api -p 3000:3000 --link ollama:ollama \
-            -e OLLAMA_HOST=http://ollama:11434 \
-            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-latest
-          
-          echo "Starting frontend container"
-          docker run -d --name assistente-web -p 8080:80 --link assistente-api:assistente-api \
-            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-latest
-          
           echo "Deployment completed successfully"
-
-  ============================================================================
-  STAGE 8: POST-DEPLOYMENT VERIFICATION
-  ============================================================================
-  
-  post-deployment-verification:
-    name: Post-Deployment Verification
-    runs-on: ubuntu-latest
-    needs: deployment
-    if: always() && needs.deployment.result == 'success'
-    timeout-minutes: 10
-    
-    steps:
-      - name: Verify backend health
-        run: |
-          echo "Checking backend health endpoint"
-          for i in {1..30}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "Backend health check: PASSED"
-              break
-            fi
-            echo "Waiting for backend to be ready... attempt $i/30"
-            sleep 2
-          done
-          
-          if [ "$STATUS" != "200" ]; then
-            echo "Backend health check: FAILED"
-            exit 1
-          fi
-      
-      - name: Verify frontend availability
-        run: |
-          echo "Checking frontend availability"
-          for i in {1..20}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080 || echo "000")
-            if [ "$STATUS" = "200" ] || [ "$STATUS" = "304" ]; then
-              echo "Frontend availability check: PASSED"
-              break
-            fi
-            echo "Waiting for frontend to be ready... attempt $i/20"
-            sleep 2
-          done
-          
-          if [ "$STATUS" != "200" ] && [ "$STATUS" != "304" ]; then
-            echo "Frontend availability check: FAILED"
-            exit 1
-          fi
-      
-      - name: Test API endpoint
-        run: |
-          echo "Testing API endpoint functionality"
-          RESPONSE=$(curl -s -X POST http://localhost:3000/ask \
-            -H "Content-Type: application/json" \
-            -d '{"question":"Test"}' || echo "{}")
-          
-          if echo "$RESPONSE" | grep -q "answer\|error"; then
-            echo "API endpoint test: PASSED"
-          else
-            echo "API endpoint test: FAILED"
-          fi
-      
-      - name: Generate verification report
-        run: |
-          echo "========================================="
-          echo "POST-DEPLOYMENT VERIFICATION REPORT"
-          echo "========================================="
-          echo "Backend health: PASSED"
-          echo "Frontend availability: PASSED"
-          echo "API functionality: PASSED"
-          echo "========================================="
-          echo "All verification checks completed successfully"
-
-  ============================================================================
-  STAGE 9: PERFORMANCE BENCHMARKING
-  ============================================================================
-  
-  performance-benchmark:
-    name: Performance Benchmark
-    runs-on: ubuntu-latest
-    needs: post-deployment-verification
-    if: github.ref == 'refs/heads/main'
-    timeout-minutes: 15
-    
-    steps:
-      - name: Measure API response time
-        run: |
-          echo "Measuring API response time"
-          TOTAL_TIME=0
-          for i in {1..10}; do
-            TIME=$(curl -s -o /dev/null -w "%{time_total}" http://localhost:3000/health)
-            TOTAL_TIME=$(echo "$TOTAL_TIME + $TIME" | bc)
-            echo "Request $i: ${TIME}s"
-          done
-          AVG_TIME=$(echo "scale=3; $TOTAL_TIME / 10" | bc)
-          echo "Average response time: ${AVG_TIME}s"
-          
-          if (( $(echo "$AVG_TIME < 0.5" | bc -l) )); then
-            echo "Performance benchmark: EXCELLENT"
-          elif (( $(echo "$AVG_TIME < 1.0" | bc -l) )); then
-            echo "Performance benchmark: GOOD"
-          else
-            echo "Performance benchmark: NEEDS IMPROVEMENT"
-          fi
-      
-      - name: Check container resource usage
-        run: |
-          echo "Container resource usage"
-          docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" ollama assistente-api assistente-web
-
-  ============================================================================
-  STAGE 10: COMPREHENSIVE REPORTING
-  ============================================================================
-  
-  comprehensive-reporting:
-    name: Comprehensive Reporting
-    runs-on: ubuntu-latest
-    needs: [source-validation, dependency-analysis, code-quality, test-execution, container-build, artifact-publishing, deployment, post-deployment-verification, performance-benchmark]
-    if: always()
-    
-    steps:
-      - name: Generate execution summary
-        run: |
-          echo "# CI/CD Pipeline Execution Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Pipeline Information" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Repository | ${{ github.repository }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Commit SHA | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Execution Date | $(date -u) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## Stage Status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Stage | Status | Duration |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|--------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Source Validation | ${{ needs.source-validation.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dependency Analysis | ${{ needs.dependency-analysis.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Code Quality | ${{ needs.code-quality.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Test Execution | ${{ needs.test-execution.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Container Build | ${{ needs.container-build.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Artifact Publishing | ${{ needs.artifact-publishing.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Deployment | ${{ needs.deployment.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Post-Deployment Verification | ${{ needs.post-deployment-verification.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "| Performance Benchmark | ${{ needs.performance-benchmark.result }} | - |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## Artifact Information" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Artifact | Location |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|----------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Backend Image | ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:backend-latest |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend Image | ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }}:frontend-latest |" >> $GITHUB_STEP_SUMMARY
-          echo "| Docker Hub | https://hub.docker.com/r/${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_REPOSITORY }} |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          FINAL_STATUS="SUCCESS"
-          for stage in source-validation dependency-analysis code-quality test-execution container-build artifact-publishing deployment post-deployment-verification; do
-            if [ "${{ needs[stage].result }}" != "success" ]; then
-              FINAL_STATUS="FAILURE"
-              break
-            fi
-          done
-          
-          echo "## Final Status: $FINAL_STATUS" >> $GITHUB_STEP_SUMMARY
-      
-      - name: Console output
-        run: |
-          echo "========================================="
-          echo "CI/CD PIPELINE EXECUTION COMPLETE"
-          echo "========================================="
-          echo "Repository: ${{ github.repository }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "Trigger: ${{ github.event_name }}"
-          echo "========================================="
-          
-          SUCCESS_COUNT=0
-          TOTAL_COUNT=0
-          for stage in source-validation dependency-analysis code-quality test-execution container-build artifact-publishing deployment post-deployment-verification; do
-            STATUS="${{ needs[stage].result }}"
-            TOTAL_COUNT=$((TOTAL_COUNT + 1))
-            if [ "$STATUS" = "success" ]; then
-              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-              echo "STAGE $stage: PASSED"
-            else
-              echo "STAGE $stage: FAILED"
-            fi
-          done
-          
-          echo "========================================="
-          echo "Success Rate: $((SUCCESS_COUNT * 100 / TOTAL_COUNT))%"
-          echo "========================================="
-          
-          if [ $SUCCESS_COUNT -eq $TOTAL_COUNT ]; then
-            echo "PIPELINE STATUS: SUCCESS"
-            exit 0
-          else
-            echo "PIPELINE STATUS: PARTIAL FAILURE"
-            exit 1
-          fi
+          echo "Images available at: https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}"
